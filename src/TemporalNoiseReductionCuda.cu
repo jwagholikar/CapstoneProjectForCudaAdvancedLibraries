@@ -1,0 +1,528 @@
+#include <cuda_runtime.h>
+#include <opencv4/opencv2/core/version.hpp>
+#include <opencv4/opencv2/imgcodecs.hpp>
+#include <opencv4/opencv2/imgproc/imgproc.hpp>
+#include <opencv4/opencv2/videoio.hpp>
+#include <opencv4/opencv2/photo/cuda.hpp>
+#include <opencv4/opencv2/photo.hpp>
+
+#include <iostream>
+
+// Kernel function for temporal noise reduction
+// Change this to NLM noise reduction
+__global__ void weightedTemporalNoiseReductionKernel(
+    char* outputFrame,
+    char* currentFrame,
+    char* previousFrame,
+    int width,
+    int height,
+    float alpha,
+    float sigma, int patch_size) // Weight for the current frame (0.0 - 1.0)
+{
+    // Calculate global thread ID
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int half_patch_size = patch_size / 2;
+    float h = sigma * sigma;
+    float currsum_weights = 0;
+    float currsum_pixel_values = 0;
+
+    float prevsum_weights = 0;
+    float prevsum_pixel_values = 0;
+
+    for (int dy = -half_patch_size; dy <= half_patch_size; ++dy) {
+        for (int dx = -half_patch_size; dx <= half_patch_size; ++dx) {
+            int nx = min(max(x + dx, 0), width - 1);
+            int ny = min(max(y + dy, 0), height - 1);
+
+            float currdiff = currentFrame[ny * width + nx] - currentFrame[y * width + x];
+            float prevdiff = previousFrame[ny * width + nx] - previousFrame[y * width + x];
+
+            //float diff =min(currdiff, prevdiff);
+
+            float currweight = expf(-(currdiff * currdiff) / h);
+            float prevweight = expf(-(prevdiff * prevdiff) / h);
+            
+            currsum_weights += currweight;
+            currsum_pixel_values += currweight * currentFrame[ny * width + nx];
+
+            prevsum_weights += prevweight;
+            prevsum_pixel_values += prevweight * previousFrame[ny * width + nx];
+        }
+    }
+
+    // Ensure within image boundaries
+    if (x < width && y < height) {
+        // Calculate pixel index (assuming grayscale or single channel)
+        int idx = y * width + x;
+        outputFrame[idx] = (alpha * (currsum_pixel_values/currsum_weights)) + ((1.0f-alpha)*(prevsum_pixel_values/prevsum_weights));
+    }
+}
+
+
+__global__ void windowingTemporalNoiseReductionKernel(
+    char* outputFrame,
+    char* currentFrame,
+    char* previousFrame,
+    int width,
+    int height,
+    float alpha)
+{
+     // Calculate global thread ID
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int windowSize = 5;
+
+    int filter[15] {
+        0, 1, 0,
+        0, 1, 0,
+        1, 1, 1,
+        0, 1, 0,
+        0, 1, 0,
+    };
+
+    // Increasing window size
+    unsigned char currPixelValues[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    unsigned char prevPixelValues[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+
+    if (
+        x > width - windowSize + 1 ||
+        y > height - windowSize + 1 ||
+        x < windowSize - 1 ||
+        y < windowSize - 1
+    )
+    {
+        return;
+    }
+
+    for (int hh = 0; hh < windowSize; hh++) 
+    {
+        for (int ww = 0; ww < windowSize; ww++) 
+        {
+            if (filter[hh * windowSize + ww] == 1)
+            {
+                int idx = (y + hh - 1) * width + (x + ww - 1);
+                currPixelValues[hh * windowSize + ww] = currentFrame[idx];
+                prevPixelValues[hh * windowSize + ww] = previousFrame[idx];
+
+            }
+        }
+    }
+
+    // Get median pixel value and assign to filteredImage
+    for (int i = 0; i < (windowSize * windowSize); i++) {
+	    for (int j = i + 1; j < (windowSize * windowSize); j++) {
+	        if (currPixelValues[i] > currPixelValues[j]) {
+		        //Swap the variables.
+		        char tmp = currPixelValues[i];
+		        currPixelValues[i] = currPixelValues[j];
+		        currPixelValues[j] = tmp;
+	        }
+
+            if (prevPixelValues[i] > prevPixelValues[j]) {
+		        //Swap the variables.
+		        char tmp = prevPixelValues[i];
+		        prevPixelValues[i] = prevPixelValues[j];
+		        prevPixelValues[j] = tmp;
+	        }
+	    }
+    }
+
+    if (x < width && y < height) {
+        // Calculate pixel index 
+        int idx = y * width + x;
+        currentFrame[idx] = currPixelValues[(windowSize * windowSize) / 2];
+        previousFrame[idx] = prevPixelValues[(windowSize * windowSize) / 2];
+        // Apply weighted average
+        outputFrame[idx] = static_cast<unsigned char>(
+            alpha * currentFrame[idx] + (1.0f - alpha) * previousFrame[idx]
+        );
+    }
+}
+
+// Example: YUV420p to RGBA conversion
+__global__ void YUV420pToRGBA(char* y_plane,
+                              char* u_plane,
+                              char* v_plane,
+                              char* rgba_output,
+                             int width, int height,
+                             int y_pitch, int uv_pitch) {
+
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x < width && y < height) {
+        // Calculate indices for Y, U, V
+        int y_idx = y * y_pitch + x;
+        int u_idx = (y / 2) * uv_pitch + (x / 2);
+        int v_idx = (y / 2) * uv_pitch + (x / 2);
+
+        // Get Y, U, V values
+        float Y = static_cast<float>(y_plane[y_idx]);
+        float U = static_cast<float>(u_plane[u_idx]);
+        float V = static_cast<float>(v_plane[v_idx]);
+
+        // Perform YUV to RGB conversion (e.g., BT.601)
+        float R = Y + 1.402f * (V - 128.0f);
+        float G = Y - 0.344136f * (U - 128.0f) - 0.714136f * (V - 128.0f);
+        float B = Y + 1.772f * (U - 128.0f);
+
+        // Clamp values to [0, 255]
+        R = fmaxf(0.0f, fminf(255.0f, R));
+        G = fmaxf(0.0f, fminf(255.0f, G));
+        B = fmaxf(0.0f, fminf(255.0f, B));
+
+        // Store RGBA output
+        int rgba_idx = (y * width + x) * 4;
+        rgba_output[rgba_idx] = static_cast<char>(R);
+        rgba_output[rgba_idx + 1] = static_cast<char>(G);
+        rgba_output[rgba_idx + 2] = static_cast<char>(B);
+        rgba_output[rgba_idx + 3] = static_cast<char>(255); // Alpha
+    }
+}
+
+__global__ void rgbToGreyscaleGPU(
+    uchar4 *rgbImage, 
+    unsigned char *greyImage,
+    int rows,
+    int cols
+)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x > cols || y > rows)
+    {
+        return;
+    }
+
+    uchar4 rgba  = rgbImage[y * cols + x];
+    unsigned char greyValue =  (0.299*rgba.x + 0.587*rgba.y + 0.114*rgba.z);
+    greyImage[y * cols + x] = greyValue;
+}
+
+
+__global__ void simpleTemporalNoiseReductionKernel(
+    char* outputFrame,
+    char* currentFrame,
+    char* previousFrame,
+    int width,
+    int height,
+    float alpha)
+{
+     // Calculate global thread ID
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x < width && y < height) {
+        // Calculate pixel index (assuming grayscale or single channel)
+        int idx = y * width + x;
+        
+        // Apply weighted average
+        outputFrame[idx] = static_cast<unsigned char>(
+            alpha * currentFrame[idx] + (1.0f - alpha) * previousFrame[idx]
+        );
+    }
+}
+
+// Host Code to launch grayscale
+
+void applyConversionRGBToGrey(
+    uchar4 *currentFrameHost,
+    unsigned char *greyFrameHost,
+    int height,
+    int width) 
+    
+{
+
+   unsigned char *greyFrameDevice;
+   uchar4 *currentFrameDevice;
+
+   cudaMalloc(&greyFrameDevice, width * height * sizeof(unsigned char));
+   cudaMalloc(&currentFrameDevice, width * height * sizeof(uchar4));
+
+   cudaMemcpy(currentFrameDevice, currentFrameHost, width * height * sizeof(uchar4), cudaMemcpyHostToDevice);
+
+    // Define grid and block dimensions
+    dim3 blockSize(16, 16);
+    dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
+
+    // Launch the kernel
+    rgbToGreyscaleGPU<<<gridSize, blockSize>>>(
+        currentFrameDevice, greyFrameDevice, height, width);
+    
+
+   // Copy result back to host
+    cudaMemcpy(greyFrameHost, greyFrameDevice, width * height * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+
+    // Free device memory
+    cudaFree(greyFrameDevice);
+    cudaFree(currentFrameDevice);
+}
+
+void applyConversionYUVtoRGBA (
+    std::vector<uint8_t> y_planeHost,
+    std::vector<uint8_t> u_planeHost,
+    std::vector<uint8_t> v_planeHost,
+    unsigned char *rgbaFrameHost, 
+    int width, 
+    int height, 
+    int y_pitch, 
+    int uv_pitch) {
+
+     // Allocate device memory for frames
+    char *y_PlaneDevice;
+    char *u_PlaneDevice;
+    char *v_PlaneDevice;
+    char *rgbaFrameDevice;
+
+    // Allocate device memory
+    cudaMalloc(&y_PlaneDevice, y_planeHost.size()*sizeof(uint8_t));
+    cudaMalloc(&u_PlaneDevice, u_planeHost.size()*sizeof(uint8_t));
+    cudaMalloc(&v_PlaneDevice, v_planeHost.size()*sizeof(uint8_t));
+    cudaMalloc(&rgbaFrameDevice, width * height * sizeof(char));
+    
+    char *temp = (char*)&y_planeHost[0];
+    char *temp1 =(char*)&u_planeHost[0];
+    char *temp2 =(char*)&v_planeHost[0];
+
+    // Copy host data to device
+    cudaMemcpy(y_PlaneDevice, temp, y_planeHost.size()*sizeof(uint8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(u_PlaneDevice, temp1, u_planeHost.size()*sizeof(uint8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(v_PlaneDevice, temp2, v_planeHost.size()*sizeof(uint8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(rgbaFrameDevice, rgbaFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
+  
+
+    // Define grid and block dimensions
+    dim3 blockSize(16, 16);
+    dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
+    // Launch Kernel
+    YUV420pToRGBA<<<gridSize, blockSize>>>(y_PlaneDevice, u_PlaneDevice, v_PlaneDevice, rgbaFrameDevice, width, height, y_pitch, uv_pitch);
+
+    // Copy result back to host
+    cudaMemcpy(rgbaFrameHost, rgbaFrameDevice, width * height * sizeof(char), cudaMemcpyDeviceToHost);
+
+    // Free device memory
+    cudaFree(y_PlaneDevice);
+    cudaFree(u_PlaneDevice);
+    cudaFree(v_PlaneDevice);
+    cudaFree(rgbaFrameDevice);
+}
+
+// Host code to launch the kernel (simplified)
+void applyTemporalNoiseReduction(
+    char *outputFrameHost,
+    char* currentFrameHost,
+    char* previousFrameHost,
+    int width,
+    int height,
+    float alpha,
+    int kernelNum)
+{
+    // Allocate device memory for frames
+    char* outputFrameDevice;
+    char* currentFrameDevice;
+    char* previousFrameDevice;
+     
+    float sigma = 3.0f; // The h is sigma*sigma Higher value removesimage contents. 
+    int patch_size=3;
+
+    cudaMalloc(&outputFrameDevice, width * height * sizeof(char));
+    cudaMalloc(&currentFrameDevice, width * height * sizeof(char));
+    cudaMalloc(&previousFrameDevice, width * height * sizeof(char));
+
+
+    // Copy host data to device
+    cudaMemcpy(currentFrameDevice, currentFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
+    cudaMemcpy(previousFrameDevice, previousFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
+
+    // Define grid and block dimensions
+    dim3 blockSize(16, 16);
+    dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
+
+    std::cout << "kernel launch" << std::endl;
+    // Launch the kernel
+    switch (kernelNum){
+        case 0: 
+            simpleTemporalNoiseReductionKernel<<<gridSize, blockSize>>>(
+                outputFrameDevice, currentFrameDevice, previousFrameDevice, width, height, alpha);
+            break;
+        case 1:
+             windowingTemporalNoiseReductionKernel<<<gridSize, blockSize>>>(
+                outputFrameDevice, currentFrameDevice, previousFrameDevice, width, height, alpha);
+            break;
+        case 2: 
+            weightedTemporalNoiseReductionKernel<<<gridSize, blockSize>>>(
+                outputFrameDevice, currentFrameDevice, previousFrameDevice, width, height, alpha, sigma, patch_size);
+            break;
+        default:
+            windowingTemporalNoiseReductionKernel<<<gridSize, blockSize>>>(
+                outputFrameDevice, currentFrameDevice, previousFrameDevice, width, height, alpha);
+            break;
+    }
+    
+
+    // Copy result back to host
+    cudaMemcpy(outputFrameHost, outputFrameDevice, width * height * sizeof(char), cudaMemcpyDeviceToHost);
+
+    // Free device memory
+    cudaFree(outputFrameDevice);
+    cudaFree(currentFrameDevice);
+    cudaFree(previousFrameDevice);        
+}
+
+
+void UsingOpenCvCPUDenoiseFunction(cv::Mat frame, cv::Mat outFrame) {
+    int templateWindowSize=7;
+    int searchWindowSize=21;
+    float h=3;
+    float hColor=3;
+
+    cv::fastNlMeansDenoisingColored(
+    frame,
+    outFrame,
+    h,  // Adjust this value based on noise level
+    hColor,
+    templateWindowSize,
+    searchWindowSize);
+
+}
+
+void extractYUVPlanes(const uint8_t* yuv_frame_data, int width, int height,
+                      std::vector<uint8_t>& y_plane,
+                      std::vector<uint8_t>& u_plane,
+                      std::vector<uint8_t>& v_plane) {
+
+    // Y plane
+    int y_plane_size = width * height;
+    y_plane.resize(y_plane_size);
+    memcpy(y_plane.data(), yuv_frame_data, y_plane_size);
+
+    // U and V planes (for YUV420p, they are quarter resolution)
+    int uv_width = width / 2;
+    int uv_height = height / 2;
+    int uv_plane_size = uv_width * uv_height;
+
+    u_plane.resize(uv_plane_size);
+    v_plane.resize(uv_plane_size);
+
+    // Calculate offsets
+    const uint8_t* u_data_start = yuv_frame_data + y_plane_size;
+    const uint8_t* v_data_start = u_data_start + uv_plane_size;
+
+    memcpy(u_plane.data(), u_data_start, uv_plane_size);
+    memcpy(v_plane.data(), v_data_start, uv_plane_size);
+}
+
+int main (int argc, char* argv[]) { 
+    cv::Mat cvFrame;
+    int retVal=0;
+
+    if(argc !=3) {
+
+        std::cerr << "Usage:" << argv[0] << "input mp4 video" << "arch CPU|CUDA" << std::endl;
+        return 1;
+    }
+    std::string strInputVideo = argv[1];
+    std::string strArch = argv[2];
+
+    // Load the input video
+    cv::VideoCapture src;
+    if (!src.open(strInputVideo)) {
+        throw std::runtime_error("Can't open '" + strInputVideo + "'");
+    }
+
+    // Open the output video for writing using input's characteristics
+    int w = src.get(cv::CAP_PROP_FRAME_WIDTH);
+    int h = src.get(cv::CAP_PROP_FRAME_HEIGHT);
+    int fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
+    double fps = src.get(cv::CAP_PROP_FPS);
+    int nframes=src.get(cv::CAP_PROP_FRAME_COUNT);
+
+    // Create the output video
+    cv::VideoWriter outVideo("denoised_" + strInputVideo, fourcc, fps, cv::Size(w, h));
+    if (!outVideo.isOpened()) {
+        throw std::runtime_error("Can't create output video");
+    }
+    
+    //Input and output frame. 
+    cv::Mat frame; // To store the original color frame
+
+    // Convert from RGB to Gray and Normalize frame. 
+    cv::Mat prev_frame;
+    cv::Mat bgr_frame;
+    cv::Mat yuv_frame;
+    cv::Mat out_frame;
+    cv::Mat color_frame;
+
+    bgr_frame.create(h, w, CV_8UC1);
+    yuv_frame.create(h, w, CV_8UC1);
+    prev_frame.create(h, w, CV_8UC1);
+    out_frame.create(h, w, CV_8UC1);
+    color_frame.create(h, w, CV_8UC3);
+
+    // Constant to run kernel
+    float alpha = 1.00f;
+
+    for(auto currFrame=0; currFrame<nframes; currFrame++) {
+        // Preprocess Frame
+        src >> frame;
+        // Break the loop if no more frames are available
+        if (frame.empty()) {
+            break;
+        }
+        if(strArch == "CPU") {
+             UsingOpenCvCPUDenoiseFunction(frame, color_frame);
+             outVideo.write(color_frame);
+        }
+        if(strArch == "CUDA") {
+
+            // Convert the BGR frame to YUV_I420
+            cv::cvtColor(frame, yuv_frame, cv::COLOR_BGR2YUV_I420);
+
+            std::vector<cv::Mat> yuv_channels;
+            cv::split(yuv_frame, yuv_channels);
+            cv::Mat y_channel = yuv_channels[0];
+
+            //call extract YUV plane information
+            std::vector<uint8_t> y_plane;
+            std::vector<uint8_t> u_plane;
+            std::vector<uint8_t> v_plane;
+
+            extractYUVPlanes(yuv_frame.data, w, h, y_plane, u_plane, v_plane);
+           // std::cout << "extracted yuv planes" << std::endl;
+           // int y_pitch = w*2;
+           // int uv_pitch= w/2;
+           
+            // Call noise reduction kernel on yuv image. 
+            unsigned char *outFramePtr =(unsigned char*)out_frame.ptr<unsigned char>(0);
+            unsigned char *prevFramePtr =(unsigned char*)prev_frame.ptr<unsigned char>(0);
+            unsigned char *yuvFramePtr =(unsigned char*)yuv_frame.ptr<unsigned char>(0);
+            applyTemporalNoiseReduction((char*)outFramePtr,(char*)yuvFramePtr, (char*)prevFramePtr, w, h, alpha, 1);
+
+            //convert YUV to BGR
+            cv::cvtColor(yuv_frame, bgr_frame, cv::COLOR_YUV2BGR_I420);
+            
+            //write video
+            outVideo.write(bgr_frame);
+
+            //swap the frames.
+            std::swap(prevFramePtr, yuvFramePtr);
+
+        }
+         
+    }
+    
+   // Opencv frame release
+   prev_frame.release();
+   bgr_frame.release();
+   yuv_frame.release();
+   out_frame.release();
+
+   return retVal;
+}
+
+

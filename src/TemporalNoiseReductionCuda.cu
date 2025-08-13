@@ -10,9 +10,6 @@
 #include<iostream>
 #include<vector>
 
-#include <cuda_runtime.h>
-#include <cudnn.h> // For deep learning operations
-#include <cublas_v2.h> // For linear algebra
 #include <opencv2/opencv.hpp>
 #include <opencv2/cudaimgproc.hpp> // For CUDA-accelerated image processing in OpenCV
 

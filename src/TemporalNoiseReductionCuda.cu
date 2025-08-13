@@ -6,7 +6,15 @@
 #include <opencv4/opencv2/photo/cuda.hpp>
 #include <opencv4/opencv2/photo.hpp>
 
-#include <iostream>
+#include<fstream>
+#include<iostream>
+#include<vector>
+
+#include <cuda_runtime.h>
+#include <cudnn.h> // For deep learning operations
+#include <cublas_v2.h> // For linear algebra
+#include <opencv2/opencv.hpp>
+#include <opencv2/cudaimgproc.hpp> // For CUDA-accelerated image processing in OpenCV
 
 // Kernel function for temporal noise reduction
 // Change this to NLM noise reduction
@@ -60,7 +68,6 @@ __global__ void weightedTemporalNoiseReductionKernel(
     }
 }
 
-
 __global__ void windowingTemporalNoiseReductionKernel(
     char* outputFrame,
     char* currentFrame,
@@ -81,6 +88,7 @@ __global__ void windowingTemporalNoiseReductionKernel(
         1, 1, 1,
         0, 1, 0,
         0, 1, 0,
+    
     };
 
     // Increasing window size
@@ -115,9 +123,9 @@ __global__ void windowingTemporalNoiseReductionKernel(
     // Get median pixel value and assign to filteredImage
     for (int i = 0; i < (windowSize * windowSize); i++) {
 	    for (int j = i + 1; j < (windowSize * windowSize); j++) {
-	        if (currPixelValues[i] > currPixelValues[j]) {
+	        if ((currPixelValues[i]) > (currPixelValues[j])) {
 		        //Swap the variables.
-		        char tmp = currPixelValues[i];
+		        char tmp = (currPixelValues[i]>>4);
 		        currPixelValues[i] = currPixelValues[j];
 		        currPixelValues[j] = tmp;
 	        }
@@ -133,9 +141,10 @@ __global__ void windowingTemporalNoiseReductionKernel(
 
     if (x < width && y < height) {
         // Calculate pixel index 
+        // calculate pixel index for y, u, v
         int idx = y * width + x;
-        currentFrame[idx] = currPixelValues[(windowSize * windowSize) / 2];
-        previousFrame[idx] = prevPixelValues[(windowSize * windowSize) / 2];
+         currentFrame[idx] = currPixelValues[(windowSize * windowSize) / 2];
+         previousFrame[idx] = prevPixelValues[(windowSize * windowSize) / 2];
         // Apply weighted average
         outputFrame[idx] = static_cast<unsigned char>(
             alpha * currentFrame[idx] + (1.0f - alpha) * previousFrame[idx]
@@ -229,7 +238,6 @@ __global__ void simpleTemporalNoiseReductionKernel(
 }
 
 // Host Code to launch grayscale
-
 void applyConversionRGBToGrey(
     uchar4 *currentFrameHost,
     unsigned char *greyFrameHost,
@@ -330,20 +338,40 @@ void applyTemporalNoiseReduction(
     float sigma = 3.0f; // The h is sigma*sigma Higher value removesimage contents. 
     int patch_size=3;
 
-    cudaMalloc(&outputFrameDevice, width * height * sizeof(char));
-    cudaMalloc(&currentFrameDevice, width * height * sizeof(char));
-    cudaMalloc(&previousFrameDevice, width * height * sizeof(char));
+    cudaError_t err= cudaMalloc(&outputFrameDevice, width * height * sizeof(char));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "cudaMalloc outputframe device failed: %s\n", cudaGetErrorString(err));
+        return;
+    }
 
+    err = cudaMalloc(&currentFrameDevice, width * height * sizeof(char));
+     if (err != cudaSuccess) {
+        fprintf(stderr, "cudaMalloc currentframe device failed: %s\n", cudaGetErrorString(err));
+        return;
+    }
+
+    err =cudaMalloc(&previousFrameDevice, width * height * sizeof(char));
+     if (err != cudaSuccess) {
+        fprintf(stderr, "cudaMalloc previousframe device failed: %s\n", cudaGetErrorString(err));
+        return;
+    }
 
     // Copy host data to device
-    cudaMemcpy(currentFrameDevice, currentFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
-    cudaMemcpy(previousFrameDevice, previousFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(currentFrameDevice, currentFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "cudaMemcpy currentframe host2device failed: %s\n", cudaGetErrorString(err));
+        return;
+    }
+    err = cudaMemcpy(previousFrameDevice, previousFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "cudaMemcpy previousframe host2device failed: %s\n", cudaGetErrorString(err));
+        return;
+    }
 
     // Define grid and block dimensions
     dim3 blockSize(16, 16);
     dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
 
-    std::cout << "kernel launch" << std::endl;
     // Launch the kernel
     switch (kernelNum){
         case 0: 
@@ -364,9 +392,19 @@ void applyTemporalNoiseReduction(
             break;
     }
     
+    // Synchronize device 
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "cudaDeviceSynchronize failed: %s\n", cudaGetErrorString(err));
+        return;
+    }
 
     // Copy result back to host
     cudaMemcpy(outputFrameHost, outputFrameDevice, width * height * sizeof(char), cudaMemcpyDeviceToHost);
+     if (err != cudaSuccess) {
+        fprintf(stderr, "cudaMemcpy outputframe device2host failed: %s\n", cudaGetErrorString(err));
+        return;
+    }
 
     // Free device memory
     cudaFree(outputFrameDevice);
@@ -417,6 +455,22 @@ void extractYUVPlanes(const uint8_t* yuv_frame_data, int width, int height,
     memcpy(v_plane.data(), v_data_start, uv_plane_size);
 }
 
+void dumpFrameToBinary(const std::string& filename, const cv::Mat& frame) {
+    std::ofstream output_file(filename, std::ios::binary);
+    if (!output_file.is_open()) {
+        std::cerr << "Error opening file: " << filename << std::endl;
+        return;
+    }
+
+    // Get the size of the raw data in bytes
+    size_t dataSize = frame.total() * frame.elemSize(); 
+
+    // Write the raw data to the file
+    output_file.write(reinterpret_cast<const char*>(frame.data), dataSize);
+
+    output_file.close();
+}
+
 int main (int argc, char* argv[]) { 
     cv::Mat cvFrame;
     int retVal=0;
@@ -447,6 +501,18 @@ int main (int argc, char* argv[]) {
     if (!outVideo.isOpened()) {
         throw std::runtime_error("Can't create output video");
     }
+
+    //Initialize CUDA and Libraries
+    cudaDeviceProp devProp;
+    CUDA_CHECK(cudaGetDeviceProperties(&devProp, 0)); // Get device properties
+    printf("GPU Device: %s\n", devProp.name);
+
+    //Create CuDNN and cuBLAS handle.
+    cudnnHandle_t cudnnHandle;
+    CUDA_CHECK(cudnnCreate(&cudnnHandle)); // Create cuDNN handle
+
+    cublasHandle_t cublasHandle;
+    CUDA_CHECK(cublasCreate(&cublasHandle)); // Create cuBLAS handle
     
     //Input and output frame. 
     cv::Mat frame; // To store the original color frame
@@ -458,14 +524,17 @@ int main (int argc, char* argv[]) {
     cv::Mat out_frame;
     cv::Mat color_frame;
 
-    bgr_frame.create(h, w, CV_8UC1);
-    yuv_frame.create(h, w, CV_8UC1);
-    prev_frame.create(h, w, CV_8UC1);
+    bgr_frame.create(h, w, CV_8UC3);
+    yuv_frame.create(h, w, CV_8UC3);
+    prev_frame.create(h, w, CV_8UC3);
     out_frame.create(h, w, CV_8UC1);
     color_frame.create(h, w, CV_8UC3);
 
+    //set all pixels prev frame to zero
+    prev_frame.setTo(cv::Scalar(0)); 
+
     // Constant to run kernel
-    float alpha = 1.00f;
+    float alpha = 0.75f;
 
     for(auto currFrame=0; currFrame<nframes; currFrame++) {
         // Preprocess Frame
@@ -480,35 +549,39 @@ int main (int argc, char* argv[]) {
         }
         if(strArch == "CUDA") {
 
-            // Convert the BGR frame to YUV_I420
-            cv::cvtColor(frame, yuv_frame, cv::COLOR_BGR2YUV_I420);
-
+            // Convert the BGR frame to YUV
+            cv::cvtColor(frame, yuv_frame, cv::COLOR_BGR2YUV);
+          
+            // Extract y, u, v channels
             std::vector<cv::Mat> yuv_channels;
             cv::split(yuv_frame, yuv_channels);
             cv::Mat y_channel = yuv_channels[0];
+            cv::Mat u_channel = yuv_channels[1];
+            cv::Mat v_channel = yuv_channels[2];
 
-            //call extract YUV plane information
-            std::vector<uint8_t> y_plane;
-            std::vector<uint8_t> u_plane;
-            std::vector<uint8_t> v_plane;
+            
+            // Call noise reduction kernel on yuv image.
+            unsigned char *outFramePtr =reinterpret_cast<unsigned char*>(out_frame.data);
+            unsigned char *prevFramePtr =reinterpret_cast<unsigned char*>(prev_frame.data);
+            unsigned char *yuvFramePtr =reinterpret_cast<unsigned char*>(y_channel.data);
+    
+            //Apply temporal reduction on y channel with kernel number
+            applyTemporalNoiseReduction((char*)outFramePtr,(char*)yuvFramePtr, (char*)prevFramePtr, w, h, alpha, 2);
 
-            extractYUVPlanes(yuv_frame.data, w, h, y_plane, u_plane, v_plane);
-           // std::cout << "extracted yuv planes" << std::endl;
-           // int y_pitch = w*2;
-           // int uv_pitch= w/2;
-           
-            // Call noise reduction kernel on yuv image. 
-            unsigned char *outFramePtr =(unsigned char*)out_frame.ptr<unsigned char>(0);
-            unsigned char *prevFramePtr =(unsigned char*)prev_frame.ptr<unsigned char>(0);
-            unsigned char *yuvFramePtr =(unsigned char*)yuv_frame.ptr<unsigned char>(0);
-            applyTemporalNoiseReduction((char*)outFramePtr,(char*)yuvFramePtr, (char*)prevFramePtr, w, h, alpha, 1);
+
+            //std::string filename ="prev_frame"+std::to_string(currFrame)+".bin";
+            //dumpFrameToBinary(filename, prev_frame);
+
+            // Merge y channel to yuv frame. 
+            y_channel = out_frame;
+            cv::merge(yuv_channels, yuv_frame);
 
             //convert YUV to BGR
-            cv::cvtColor(yuv_frame, bgr_frame, cv::COLOR_YUV2BGR_I420);
+            cv::cvtColor(yuv_frame, bgr_frame, cv::COLOR_YUV2BGR);
             
             //write video
             outVideo.write(bgr_frame);
-
+           
             //swap the frames.
             std::swap(prevFramePtr, yuvFramePtr);
 
@@ -524,5 +597,3 @@ int main (int argc, char* argv[]) {
 
    return retVal;
 }
-
-

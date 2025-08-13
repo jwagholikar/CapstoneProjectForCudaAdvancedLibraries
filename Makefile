@@ -338,6 +338,11 @@ endif
 # Target rules
 all: build
 
+SRC_DIR = src
+BIN_DIR = bin
+DATA_DIR = data
+LIB_DIR = lib
+
 build: TemporalNoiseReductionCuda
 
 check.deps:
@@ -347,18 +352,18 @@ else
 	@echo "Sample is ready - all dependencies have been met"
 endif
 
-TemporalNoiseReductionCuda.o:TemporalNoiseReductionCuda.cu
+TemporalNoiseReductionCuda.o:$(SRC_DIR)/TemporalNoiseReductionCuda.cu
 	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 TemporalNoiseReductionCuda: TemporalNoiseReductionCuda.o
 	$(EXEC) $(NVCC) $(ALL_LDFLAGS) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)
-	
 
 run: build
-	$(EXEC) ./TemporalNoiseReductionCuda
+	$(EXEC) ./TemporalNoiseReductionCuda $(ARGS)
 
 clean:
-	rm -f TemporalNoiseReductionCuda TemporalNoiseReductionCuda.o
+	rm -f $(BIN_DIR)/TemporalNoiseReductionCuda TemporalNoiseReductionCuda.o
+    rm -f $(BIN_DIR)
 	
 
 clobber: clean

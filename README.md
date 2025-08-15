@@ -1,4 +1,4 @@
-# Temporal Noise Reduction with CUDA Kernels.
+# Temporal Noise Reduction With CUDA Kernels.
 
 ## Overview
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project demonstrates the use of CUDA advanced libraries for temporal noise reduction for video and perform cubic spline interpolation of function Ax=B. The goal is to utilize GPU acceleration to execute kernels and perform multi frame processinig. The project is a Capstone project for Cuda Advanced Libraries and serves as an example for understanding how to use different cuda advanaced libraries for video processing.
+This project demonstrates the use of CUDA advanced libraries for temporal noise reduction for video and perform cubic spline interpolation of function Ax=B. The goal is to utilize GPU acceleration to execute kernels and perform multi frame processing. The project is a capstone project for cuda advanced libraries and serves as an example for understanding how to use different cuda advanaced libraries for video processing.
 
 ## Project 
 This project mainly focus on implementing different cuda kernels and suing advanced libraaries to perform linear algaebra functions or using tensor libraries to generate tensors and peform complex convolution operations.

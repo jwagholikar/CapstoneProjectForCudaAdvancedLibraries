@@ -1,17 +1,31 @@
 #include <cuda_runtime.h>
+
 #include <opencv4/opencv2/core/version.hpp>
 #include <opencv4/opencv2/imgcodecs.hpp>
 #include <opencv4/opencv2/imgproc/imgproc.hpp>
 #include <opencv4/opencv2/videoio.hpp>
 #include <opencv4/opencv2/photo/cuda.hpp>
 #include <opencv4/opencv2/photo.hpp>
+#include <opencv4/opencv2/dnn.hpp>
+#include <opencv4/opencv2/dnn/dnn.hpp>
 
 #include<fstream>
 #include<iostream>
 #include<vector>
 
-#include <opencv2/opencv.hpp>
-#include <opencv2/cudaimgproc.hpp> // For CUDA-accelerated image processing in OpenCV
+#include <cublas.h> // For linear algebra
+#include <cublas_v2.h> // For linear algebra
+
+// Helper function to check CUDA errors
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA error in %s (%s:%d): %s\n", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+
 
 // Kernel function for temporal noise reduction
 // Change this to NLM noise reduction
@@ -43,8 +57,6 @@ __global__ void weightedTemporalNoiseReductionKernel(
 
             float currdiff = currentFrame[ny * width + nx] - currentFrame[y * width + x];
             float prevdiff = previousFrame[ny * width + nx] - previousFrame[y * width + x];
-
-            //float diff =min(currdiff, prevdiff);
 
             float currweight = expf(-(currdiff * currdiff) / h);
             float prevweight = expf(-(prevdiff * prevdiff) / h);
@@ -458,7 +470,7 @@ void dumpFrameToBinary(const std::string& filename, const cv::Mat& frame) {
         std::cerr << "Error opening file: " << filename << std::endl;
         return;
     }
-
+    
     // Get the size of the raw data in bytes
     size_t dataSize = frame.total() * frame.elemSize(); 
 
@@ -466,6 +478,93 @@ void dumpFrameToBinary(const std::string& filename, const cv::Mat& frame) {
     output_file.write(reinterpret_cast<const char*>(frame.data), dataSize);
 
     output_file.close();
+}
+
+void getCubicSplineInterpolation(cv::Mat A_vec, 
+                            cv::Mat b_vec, 
+                            cv::Mat x_vec,
+                            int batchSize, 
+                            int height,
+                            int width)
+{
+   //Getting inverse of A matrix. 
+   cublasStatus status; 
+   cublasHandle_t handle;
+   cublasCreate_v2(&handle);
+  
+   //Allocating memory. 
+   float *d_A_vec;
+   float *d_b_vec;
+   float *d_x_vec;
+   float alpha = 1.0f, beta = 0.0f; 
+
+
+   status=cublasAlloc(A_vec.rows * A_vec.cols, sizeof(float), (void**)&d_A_vec);
+     if (status != CUBLAS_STATUS_SUCCESS) {
+      fprintf (stderr, "!!!! device memory allocation error (A)\n");
+      return;
+    }
+
+    status=cublasAlloc(b_vec.cols * b_vec.rows, sizeof(float), (void**)&d_b_vec);
+     if (status != CUBLAS_STATUS_SUCCESS) {
+      fprintf (stderr, "!!!! device memory allocation error (b)\n");
+      return;
+    }
+
+    status=cublasAlloc(A_vec.rows * b_vec.rows, sizeof(float), (void**)&d_x_vec);
+     if (status != CUBLAS_STATUS_SUCCESS) {
+      fprintf (stderr, "!!!! device memory allocation error (x)\n");
+      return;
+    }
+    
+    float *A_vec_data = (float*) malloc(A_vec.rows*A_vec.cols*sizeof(float));
+    float *b_vec_data = (float*) malloc(b_vec.rows*b_vec.cols*sizeof(float));
+    
+    memcpy(A_vec_data, A_vec.data, A_vec.rows*A_vec.cols*sizeof(float));
+    memcpy(b_vec_data, b_vec.data, b_vec.rows*b_vec.cols*sizeof(float));
+    
+    //Copy to device
+    status = cublasSetMatrix(A_vec.rows,A_vec.cols,sizeof(float),A_vec_data,A_vec.rows,d_A_vec,A_vec.rows);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+      fprintf (stderr, "!!!! device memory copy error (A)\n");
+      return;
+    }
+
+    status=cublasSetMatrix(b_vec.rows,b_vec.cols,sizeof(float),b_vec_data,b_vec.rows,d_b_vec,b_vec.rows);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+      fprintf (stderr, "!!!! device memory copy error (b)\n");
+      return;
+    }
+
+    cublasSgemm(
+        handle,
+        CUBLAS_OP_T,    // Transpose operation for A (CUBLAS_OP_N for no transpose)
+        CUBLAS_OP_N,    // Transpose operation for B
+        A_vec.rows,      // Number of rows of op(A) and C
+        b_vec.cols,       // Number of columns of op(B) and C
+        A_vec.cols,      // Number of columns of op(A) and rows of op(B)
+        &alpha,      // Pointer to scalar alpha
+        d_A_vec,         // Pointer to device memory of A
+        A_vec.cols,           // Leading dimension of A
+        d_b_vec,         // Pointer to device memory of B
+        b_vec.cols,           // Leading dimension of B
+        &beta,       // Pointer to scalar beta
+        d_x_vec,         // Pointer to device memory of C
+        x_vec.cols);          // Leading dimension of C
+       
+    // Copy coefficients back to the host memory
+    cublasGetMatrix(x_vec.rows,x_vec.cols,sizeof(float),d_x_vec,x_vec.rows,x_vec.data,x_vec.rows);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+      fprintf (stderr, "!!!! device read error (A)\n");
+      return;
+    }
+        
+   free(A_vec_data);
+   free(b_vec_data);
+   cudaFree(d_x_vec);
+   cudaFree(d_A_vec);
+   cudaFree(d_b_vec);
+   cublasDestroy_v2(handle);
 }
 
 int main (int argc, char* argv[]) { 
@@ -479,7 +578,7 @@ int main (int argc, char* argv[]) {
     }
     std::string strInputVideo = argv[1];
     std::string strArch = argv[2];
-
+    
     // Load the input video
     cv::VideoCapture src;
     if (!src.open(strInputVideo)) {
@@ -504,13 +603,6 @@ int main (int argc, char* argv[]) {
     CUDA_CHECK(cudaGetDeviceProperties(&devProp, 0)); // Get device properties
     printf("GPU Device: %s\n", devProp.name);
 
-    //Create CuDNN and cuBLAS handle.
-    cudnnHandle_t cudnnHandle;
-    CUDA_CHECK(cudnnCreate(&cudnnHandle)); // Create cuDNN handle
-
-    cublasHandle_t cublasHandle;
-    CUDA_CHECK(cublasCreate(&cublasHandle)); // Create cuBLAS handle
-    
     //Input and output frame. 
     cv::Mat frame; // To store the original color frame
 
@@ -532,6 +624,17 @@ int main (int argc, char* argv[]) {
 
     // Constant to run kernel
     float alpha = 0.75f;
+    int batchSize = 1;
+
+    // Setup matrix
+    cv::Mat A_vec;
+    cv::Mat x_vec;
+    cv::Mat b_vec;
+    A_vec.create(h,w, CV_8UC3);
+    b_vec.create(h,w, CV_8UC1);
+    x_vec.create(h, w, CV_8UC1);
+    std::vector<float> coefficients;
+    std::vector<int> frames;
 
     for(auto currFrame=0; currFrame<nframes; currFrame++) {
         // Preprocess Frame
@@ -557,6 +660,9 @@ int main (int argc, char* argv[]) {
             cv::Mat v_channel = yuv_channels[2];
 
             
+            yuv_frame.copyTo(A_vec);
+
+            
             // Call noise reduction kernel on yuv image.
             unsigned char *outFramePtr =reinterpret_cast<unsigned char*>(out_frame.data);
             unsigned char *prevFramePtr =reinterpret_cast<unsigned char*>(prev_frame.data);
@@ -570,20 +676,33 @@ int main (int argc, char* argv[]) {
             //dumpFrameToBinary(filename, prev_frame);
 
             // Merge y channel to yuv frame. 
-            y_channel = out_frame;
+            out_frame.copyTo(y_channel);
             cv::merge(yuv_channels, yuv_frame);
 
             //convert YUV to BGR
             cv::cvtColor(yuv_frame, bgr_frame, cv::COLOR_YUV2BGR);
-            
+
+            //runDetection(bgr_frame, net);
+            out_frame.copyTo(b_vec);
+
+            // find x in Ax=B
+            getCubicSplineInterpolation(A_vec, b_vec, x_vec, batchSize, h, w);
+
+            //c(t) = H3,0(t) * p0 + H3,1(t) * v0 + H3,2(t) * v1 + H3,3(t) * p1
+            //Calculate single coefficient per frame. 
+            cv::Scalar meanOfSpecificColumn = cv::mean(x_vec);
+            float meanFloat0 = static_cast<float>(meanOfSpecificColumn[0]);
+            coefficients.push_back(meanFloat0);
+            frames.push_back(currFrame);
+
             //write video
             outVideo.write(bgr_frame);
            
             //swap the frames.
             std::swap(prevFramePtr, yuvFramePtr);
 
-        }
-         
+        }    
+
     }
     
    // Opencv frame release

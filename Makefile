@@ -276,7 +276,7 @@ INCLUDES  := -I./
 INCLUDES  += -I/usr/include/opencv4
 INCLUDES  += -I/usr/include/opencv4/opencv2
 LIBRARIES := 
-LIBRARIES += -L/usr/local/lib64 -lopencv_stitching -lopencv_objdetect -lopencv_calib3d -lopencv_features2d -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs -lopencv_video -lopencv_photo -lopencv_ml -lopencv_imgproc -lopencv_flann -lopencv_core
+LIBRARIES += -L/usr/local/lib64 -lopencv_stitching -lopencv_objdetect -lopencv_calib3d -lopencv_features2d -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs -lopencv_video -lopencv_photo -lopencv_ml -lopencv_imgproc -lopencv_flann -lopencv_core -lcublas
 ################################################################################
 
 #Detect if installed version of GCC supports required C++11
@@ -362,8 +362,6 @@ run: build
 	$(EXEC) ./TemporalNoiseReductionCuda $(ARGS)
 
 clean:
-	rm -f $(BIN_DIR)/TemporalNoiseReductionCuda TemporalNoiseReductionCuda.o
-    rm -f $(BIN_DIR)
-	
+	rm -f $(BIN_DIR)/TemporalNoiseReductionCuda TemporalNoiseReductionCuda.o $(BIN_DIR)
 
 clobber: clean

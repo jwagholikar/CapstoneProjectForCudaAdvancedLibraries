@@ -13,6 +13,8 @@ Three kernels are implemented to perform temporal noise reduction of video. The 
 # Cubic Spline Interpolation.
 The interpolation coefficients are generated with Ax=B function where coefficient x is calculated by taking transpose of A and performing matrix multiplication with B. 
 x=(A)transposeB The Cubic spline interpolation with X, Y coefficients where X corresponds to the frame number and Y is the coefficients generated with above function. 
+This needed GEMM operation. It is observed that the memory allocation is failing due to insufficient memory for CuBlas GEMM operation. Currently disabling this feature,
+The data points for the plot are already used from the extracted data.
 
 ## Code Organization
 

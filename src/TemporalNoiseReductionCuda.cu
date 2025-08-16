@@ -134,7 +134,7 @@ __global__ void windowingTemporalNoiseReductionKernel(
 	    for (int j = i + 1; j < (windowSize * windowSize); j++) {
 	        if ((currPixelValues[i]) > (currPixelValues[j])) {
 		        //Swap the variables.
-		        char tmp = (currPixelValues[i]>>4);
+		        char tmp = (currPixelValues[i]);
 		        currPixelValues[i] = currPixelValues[j];
 		        currPixelValues[j] = tmp;
 	        }
@@ -676,7 +676,7 @@ int main (int argc, char* argv[]) {
             //dumpFrameToBinary(filename, prev_frame);
 
             // Merge y channel to yuv frame. 
-            out_frame.copyTo(y_channel);
+            out_frame=y_channel;
             cv::merge(yuv_channels, yuv_frame);
 
             //convert YUV to BGR
@@ -685,15 +685,18 @@ int main (int argc, char* argv[]) {
             //runDetection(bgr_frame, net);
             out_frame.copyTo(b_vec);
 
-            // find x in Ax=B
-            getCubicSplineInterpolation(A_vec, b_vec, x_vec, batchSize, h, w);
-
-            //c(t) = H3,0(t) * p0 + H3,1(t) * v0 + H3,2(t) * v1 + H3,3(t) * p1
+           //c(t) = H3,0(t) * p0 + H3,1(t) * v0 + H3,2(t) * v1 + H3,3(t) * p1
             //Calculate single coefficient per frame. 
+            // Disabling the code for insufficient memory for video processing of 
+           // large videos of 3040x2160_24FPS/frame.
+            // find x in Ax=B
+#if 0
+            getCubicSplineInterpolation(A_vec, b_vec, x_vec, batchSize, h, w);
             cv::Scalar meanOfSpecificColumn = cv::mean(x_vec);
             float meanFloat0 = static_cast<float>(meanOfSpecificColumn[0]);
             coefficients.push_back(meanFloat0);
             frames.push_back(currFrame);
+#endif
 
             //write video
             outVideo.write(bgr_frame);

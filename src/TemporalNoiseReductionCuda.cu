@@ -12,6 +12,7 @@
 #include<fstream>
 #include<iostream>
 #include<vector>
+#include<string>
 
 #include <cublas.h> // For linear algebra
 #include <cublas_v2.h> // For linear algebra
@@ -330,7 +331,7 @@ void applyConversionYUVtoRGBA (
 }
 
 // Host code to launch the kernel (simplified)
-void applyTemporalNoiseReduction(
+float applyTemporalNoiseReduction(
     char *outputFrameHost,
     char* currentFrameHost,
     char* previousFrameHost,
@@ -343,6 +344,11 @@ void applyTemporalNoiseReduction(
     char* outputFrameDevice;
     char* currentFrameDevice;
     char* previousFrameDevice;
+
+    //Measure timing information
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
      
     float sigma = 3.0f; // The h is sigma*sigma Higher value removesimage contents. 
     int patch_size=3;
@@ -350,31 +356,31 @@ void applyTemporalNoiseReduction(
     cudaError_t err= cudaMalloc(&outputFrameDevice, width * height * sizeof(char));
     if (err != cudaSuccess) {
         fprintf(stderr, "cudaMalloc outputframe device failed: %s\n", cudaGetErrorString(err));
-        return;
+        return EXIT_FAILURE;
     }
 
     err = cudaMalloc(&currentFrameDevice, width * height * sizeof(char));
      if (err != cudaSuccess) {
         fprintf(stderr, "cudaMalloc currentframe device failed: %s\n", cudaGetErrorString(err));
-        return;
+        return EXIT_FAILURE;
     }
 
     err =cudaMalloc(&previousFrameDevice, width * height * sizeof(char));
      if (err != cudaSuccess) {
         fprintf(stderr, "cudaMalloc previousframe device failed: %s\n", cudaGetErrorString(err));
-        return;
+        return EXIT_FAILURE;
     }
 
     // Copy host data to device
     err = cudaMemcpy(currentFrameDevice, currentFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy currentframe host2device failed: %s\n", cudaGetErrorString(err));
-        return;
+        return EXIT_FAILURE;
     }
     err = cudaMemcpy(previousFrameDevice, previousFrameHost, width * height * sizeof(char), cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy previousframe host2device failed: %s\n", cudaGetErrorString(err));
-        return;
+        return EXIT_FAILURE;
     }
 
     // Define grid and block dimensions
@@ -382,6 +388,7 @@ void applyTemporalNoiseReduction(
     dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
 
     // Launch the kernel
+    cudaEventRecord(start, 0);
     switch (kernelNum){
         case 0: 
             simpleTemporalNoiseReductionKernel<<<gridSize, blockSize>>>(
@@ -401,33 +408,49 @@ void applyTemporalNoiseReduction(
             break;
     }
     
+    //Stop record timing
+    cudaEventRecord(stop,0);
+    cudaEventSynchronize(stop);
+    
     // Synchronize device 
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         fprintf(stderr, "cudaDeviceSynchronize failed: %s\n", cudaGetErrorString(err));
-        return;
+        return EXIT_FAILURE; 
     }
 
     // Copy result back to host
     cudaMemcpy(outputFrameHost, outputFrameDevice, width * height * sizeof(char), cudaMemcpyDeviceToHost);
      if (err != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy outputframe device2host failed: %s\n", cudaGetErrorString(err));
-        return;
+        return EXIT_FAILURE;
     }
+
+    // Calculate timing infomration
+    // Calculate elapsed time in milliseconds
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
 
     // Free device memory
     cudaFree(outputFrameDevice);
     cudaFree(currentFrameDevice);
-    cudaFree(previousFrameDevice);        
+    cudaFree(previousFrameDevice);
+
+    return milliseconds;     
 }
 
 
-void UsingOpenCvCPUDenoiseFunction(cv::Mat frame, cv::Mat outFrame) {
+float UsingOpenCvCPUDenoiseFunction(cv::Mat frame, cv::Mat outFrame) {
     int templateWindowSize=7;
     int searchWindowSize=21;
     float h=3;
     float hColor=3;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
+    // Launch the kernel
+    cudaEventRecord(start, 0);
     cv::fastNlMeansDenoisingColored(
     frame,
     outFrame,
@@ -435,6 +458,17 @@ void UsingOpenCvCPUDenoiseFunction(cv::Mat frame, cv::Mat outFrame) {
     hColor,
     templateWindowSize,
     searchWindowSize);
+
+    //Stop record timing
+    cudaEventRecord(stop,0);
+    cudaEventSynchronize(stop);
+
+    // Calculate timing infomration
+    // Calculate elapsed time in milliseconds
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
+   return milliseconds;
 
 }
 
@@ -500,19 +534,20 @@ void getCubicSplineInterpolation(cv::Mat A_vec,
 
 
    status=cublasAlloc(A_vec.rows * A_vec.cols, sizeof(float), (void**)&d_A_vec);
-     if (status != CUBLAS_STATUS_SUCCESS) {
+   if (status != CUBLAS_STATUS_SUCCESS) {
       fprintf (stderr, "!!!! device memory allocation error (A)\n");
       return;
     }
 
-    status=cublasAlloc(b_vec.cols * b_vec.rows, sizeof(float), (void**)&d_b_vec);
-     if (status != CUBLAS_STATUS_SUCCESS) {
+    status=cublasAlloc(b_vec.cols * b_vec.rows * width, sizeof(float), (void**)&d_b_vec);
+    if (status != CUBLAS_STATUS_SUCCESS) {
       fprintf (stderr, "!!!! device memory allocation error (b)\n");
       return;
+      
     }
 
-    status=cublasAlloc(A_vec.rows * b_vec.rows, sizeof(float), (void**)&d_x_vec);
-     if (status != CUBLAS_STATUS_SUCCESS) {
+    status=cublasAlloc(x_vec.rows * x_vec.cols , sizeof(float), (void**)&d_x_vec);
+    if (status != CUBLAS_STATUS_SUCCESS) {
       fprintf (stderr, "!!!! device memory allocation error (x)\n");
       return;
     }
@@ -557,8 +592,9 @@ void getCubicSplineInterpolation(cv::Mat A_vec,
     if (status != CUBLAS_STATUS_SUCCESS) {
       fprintf (stderr, "!!!! device read error (A)\n");
       return;
+
     }
-        
+
    free(A_vec_data);
    free(b_vec_data);
    cudaFree(d_x_vec);
@@ -570,14 +606,23 @@ void getCubicSplineInterpolation(cv::Mat A_vec,
 int main (int argc, char* argv[]) { 
     cv::Mat cvFrame;
     int retVal=0;
+    int kernelNum;
 
-    if(argc !=3) {
+    if(argc < 3) {
 
-        std::cerr << "Usage:" << argv[0] << "input mp4 video" << "arch CPU|CUDA" << std::endl;
+        std::cerr << "Usage:" << argv[0] << " " << "<InputVideo.mp4>" << " " << "<Architecture CPU|CUDA>" << " " << "<Kernel Number 0|1|2|>" << std::endl;
         return 1;
     }
     std::string strInputVideo = argv[1];
     std::string strArch = argv[2];
+
+    if(argv[3] != NULL){
+        std::string kernel = argv[3];
+        kernelNum = std::stoi(kernel);
+    } else {
+        // Use default kernel number
+        kernelNum =1;
+    }
     
     // Load the input video
     cv::VideoCapture src;
@@ -599,9 +644,12 @@ int main (int argc, char* argv[]) {
     }
 
     //Initialize CUDA and Libraries
-    cudaDeviceProp devProp;
-    CUDA_CHECK(cudaGetDeviceProperties(&devProp, 0)); // Get device properties
-    printf("GPU Device: %s\n", devProp.name);
+    if(strArch=="CUDA") {
+        cudaDeviceProp devProp;
+        CUDA_CHECK(cudaGetDeviceProperties(&devProp, 0)); // Get device properties
+        printf("GPU Device: %s\n", devProp.name);
+    }
+    
 
     //Input and output frame. 
     cv::Mat frame; // To store the original color frame
@@ -615,16 +663,30 @@ int main (int argc, char* argv[]) {
 
     bgr_frame.create(h, w, CV_8UC3);
     yuv_frame.create(h, w, CV_8UC3);
-    prev_frame.create(h, w, CV_8UC3);
-    out_frame.create(h, w, CV_8UC1);
+    prev_frame.create(h *3/2, w, CV_8UC1);
+    out_frame.create(h * 3/2, w, CV_8UC1);
     color_frame.create(h, w, CV_8UC3);
+
+    cv::Mat img;
+    img.create(h, w, CV_8UC2);
 
     //set all pixels prev frame to zero
     prev_frame.setTo(cv::Scalar(0)); 
+    out_frame.setTo(cv::Scalar(0)); 
 
+    //create separate y, u, v channels
+    cv::Mat y_channel;
+    cv::Mat u_channel;
+    cv::Mat v_channel;
+
+    y_channel.create(h, w, CV_8UC1);
+    u_channel.create(h, w, CV_8UC1);
+    v_channel.create(h, w, CV_8UC1);
+
+    cv::Mat yuv420_image;
     // Constant to run kernel
     float alpha = 0.75f;
-    int batchSize = 1;
+    //int batchSize = 1;
 
     // Setup matrix
     cv::Mat A_vec;
@@ -635,6 +697,9 @@ int main (int argc, char* argv[]) {
     x_vec.create(h, w, CV_8UC1);
     std::vector<float> coefficients;
     std::vector<int> frames;
+    float time=0;
+    float totalTime=0;
+
 
     for(auto currFrame=0; currFrame<nframes; currFrame++) {
         // Preprocess Frame
@@ -644,59 +709,55 @@ int main (int argc, char* argv[]) {
             break;
         }
         if(strArch == "CPU") {
-             UsingOpenCvCPUDenoiseFunction(frame, color_frame);
+             time =UsingOpenCvCPUDenoiseFunction(frame, color_frame);
+             totalTime += time;
              outVideo.write(color_frame);
         }
         if(strArch == "CUDA") {
 
             // Convert the BGR frame to YUV
             cv::cvtColor(frame, yuv_frame, cv::COLOR_BGR2YUV);
-          
-            // Extract y, u, v channels
-            std::vector<cv::Mat> yuv_channels;
-            cv::split(yuv_frame, yuv_channels);
-            cv::Mat y_channel = yuv_channels[0];
-            cv::Mat u_channel = yuv_channels[1];
-            cv::Mat v_channel = yuv_channels[2];
 
-            
-            yuv_frame.copyTo(A_vec);
+            cv::cvtColor(frame, yuv420_image,  cv::COLOR_BGR2YUV_I420);
 
-            
+            // 1. Separate out Y, U, V planes.
+            cv::Mat y_plane(h, w, CV_8UC1, yuv420_image.data);
+            cv::Mat u_plane(h / 2, w / 2, CV_8UC1, yuv420_image.data + (w* h));
+            cv::Mat v_plane(h / 2, w / 2, CV_8UC1, yuv420_image.data + (w * h) + (w * h / 4));
+
+            // 2. Create interleaved UV plane
+            cv::Mat uv_plane(h / 2, w, CV_8UC1);
+            for (int i = 0; i < h / 2; ++i) {
+                for (int j = 0; j < w / 2; ++j) {
+                    uv_plane.at<uchar>(i, 2 * j) = u_plane.at<uchar>(i, j); // U
+                    uv_plane.at<uchar>(i, 2 * j + 1) = v_plane.at<uchar>(i, j); // V
+                }
+            }
+
+            // 3. Combine Y and UV planes into NV12
+            cv::Mat nv12_frame(h * 3 / 2, w, CV_8UC1);
+            y_plane.copyTo(nv12_frame(cv::Rect(0, 0, w, h)));
+            uv_plane.copyTo(nv12_frame(cv::Rect(0, h, w, h / 2))); 
+
+
             // Call noise reduction kernel on yuv image.
             unsigned char *outFramePtr =reinterpret_cast<unsigned char*>(out_frame.data);
             unsigned char *prevFramePtr =reinterpret_cast<unsigned char*>(prev_frame.data);
-            unsigned char *yuvFramePtr =reinterpret_cast<unsigned char*>(y_channel.data);
-    
-            //Apply temporal reduction on y channel with kernel number
-            applyTemporalNoiseReduction((char*)outFramePtr,(char*)yuvFramePtr, (char*)prevFramePtr, w, h, alpha, 2);
+            unsigned char *yuvFramePtr =reinterpret_cast<unsigned char*>(nv12_frame.data);
 
+           
+            //Apply temporal reduction on y channel with kernel number
+            time = applyTemporalNoiseReduction((char*)outFramePtr,(char*)yuvFramePtr, (char*)prevFramePtr, w, h, alpha, kernelNum);
+            totalTime +=time;
+
+            // Merge y channel to yuv frame. 
+            //out_frame.copyTo(nv12_frame);
 
             //std::string filename ="prev_frame"+std::to_string(currFrame)+".bin";
             //dumpFrameToBinary(filename, prev_frame);
 
-            // Merge y channel to yuv frame. 
-            out_frame=y_channel;
-            cv::merge(yuv_channels, yuv_frame);
-
-            //convert YUV to BGR
-            cv::cvtColor(yuv_frame, bgr_frame, cv::COLOR_YUV2BGR);
-
-            //runDetection(bgr_frame, net);
-            out_frame.copyTo(b_vec);
-
-           //c(t) = H3,0(t) * p0 + H3,1(t) * v0 + H3,2(t) * v1 + H3,3(t) * p1
-            //Calculate single coefficient per frame. 
-            // Disabling the code for insufficient memory for video processing of 
-           // large videos of 3040x2160_24FPS/frame.
-            // find x in Ax=B
-#if 0
-            getCubicSplineInterpolation(A_vec, b_vec, x_vec, batchSize, h, w);
-            cv::Scalar meanOfSpecificColumn = cv::mean(x_vec);
-            float meanFloat0 = static_cast<float>(meanOfSpecificColumn[0]);
-            coefficients.push_back(meanFloat0);
-            frames.push_back(currFrame);
-#endif
+            cv::Mat picNV12 = cv::Mat(h * 3/2, w, CV_8UC1, nv12_frame.data);
+            cv::cvtColor(picNV12, bgr_frame, cv::COLOR_YUV2BGR_NV12);
 
             //write video
             outVideo.write(bgr_frame);
@@ -704,10 +765,23 @@ int main (int argc, char* argv[]) {
             //swap the frames.
             std::swap(prevFramePtr, yuvFramePtr);
 
-        }    
+            // find x in Ax=B
+            //getCubicSplineInterpolation(A_vec, b_vec, x_vec, batchSize, h, w);
+
+            //c(t) = H3,0(t) * p0 + H3,1(t) * v0 + H3,2(t) * v1 + H3,3(t) * p1
+            //Calculate single coefficient per frame. 
+           // cv::Scalar meanOfSpecificColumn = cv::mean(x_vec);
+           // float meanFloat0 = static_cast<float>(meanOfSpecificColumn[0]);
+            //coefficients.push_back(meanFloat0);
+            //frames.push_back(currFrame);
+
+        } 
+
+       
 
     }
-    
+   
+   printf("Kernel execution time: %f ms\n", totalTime);   
    // Opencv frame release
    prev_frame.release();
    bgr_frame.release();

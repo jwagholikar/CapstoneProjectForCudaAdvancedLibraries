@@ -750,8 +750,6 @@ int main (int argc, char* argv[]) {
             time = applyTemporalNoiseReduction((char*)outFramePtr,(char*)yuvFramePtr, (char*)prevFramePtr, w, h, alpha, kernelNum);
             totalTime +=time;
 
-            // Merge y channel to yuv frame. 
-            //out_frame.copyTo(nv12_frame);
 
             //std::string filename ="prev_frame"+std::to_string(currFrame)+".bin";
             //dumpFrameToBinary(filename, prev_frame);

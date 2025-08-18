@@ -8,11 +8,19 @@ This project demonstrates the use of CUDA advanced libraries for temporal noise 
 This project mainly focus on implementing different cuda kernels and suing advanced libraaries to perform linear algaebra functions or using tensor libraries to generate tensors and peform complex convolution operations.
 
 # Temporal Noise Reduction.
-Three kernels are implemented to perform temporal noise reduction of video. The first is a simple noise reduction comparing current and previous frame and using alpha coefficient for proportioning two frames. The second kernel is windowing temporal noise reduction where sliding window with kernel dimension 5x5 is used to generate median and replace pixels of the filter set to one with that value of YUV frame. The third kernel is weighted temporal nosie reduction. The weights are associated to pixels and average weight is used to replace value of the indexed pixel. The OpenCV API is used to perform noise reduction on the CPU. 
+There are total three kernels are implemented for denpising the video. The input vidoe is converted from BGR to YUV plane and in NV12 format for faster computation. The data is also generated for denoising of grey frames. The first kernel mainly helps reducing noise by taking percentage of current and previous pixels values based on the defined alpha coefficient. If alpha coefficient is 0.75 then 75% of current frame pixels intesity is added to 25% of previous frame pixel intesity to generate a new frame. The second kernel mainly works as a sliding window on the given frame based on 3x3, 5x5 or 7x7 filter. Based on the filter values the median of the pixel intensity is calculated on the filtered image and applied to the filtered frame to denoise pixel intensity. The third kernel is weighted temproal reductions where weights are calculated per pixel intensity and average weight is assigned to current frame. In YUV plan the weight associated with Y plane pixels is twice the weight associated with UV plane pixels.
 
 # Cubic Spline Interpolation.
-The interpolation coefficients are generated with Ax=B function where coefficient x is calculated by taking transpose of A and performing matrix multiplication with B. 
-x=(A)TB. The Cubic spline interpolation with X, Y coefficients where X corresponds to the frame number and Y is the coefficients generated with above function. GEMM operator from CUBlas library is used to perform this operation. It is observed that the memory allocation is failing due to insufficient memory for 3840x2160 data frames. This feature is disabled right now.The data points for the plot are already used from the extracted data.
+Normally directly interpolating noisy data can amplify noisy data. The interpolation coefficients are generated based on the noised and denoised frames. The function used for it is $Ax=B$ where x is unknown coefficient and its value is calculated by perforining matrix multiplication of $A^TB$ These coeffcients are used for a given time $t$ to calculate final coefficient c(t) as $c(t) = H3,0(t) * p0 + H3,1(t) * v0 + H3,2(t) * v1 + H3,3(t) * p1$ The cubic spline interpolation of these coefficients are plotted by generating new X values spread across MIN and MAX range. GEMM operator can be used to perform matrix multiplication operation for larger frames. There can be limited memory associated for allocation of larger matrix so coefficients are calculated for sample video frames and plotted against newly generated X values. This feature is disabled right now.The data points for the plot are already used from the extracted data.
+
+# Performance
+The kernel performance is measured on Nvidia A10G GPU and CPU. 
+| MP4 Video Input | Kernel 0 GPU | Kernel 1 GPU | Kernel 2 GPU | CPU  | Percentage Improvement | 
+| ------------- | ------------- | ------------- | ------------- | ------------- | ------------- |
+| hd_1920_1080_30fps | 6.091455 ms | 697.605835 ms | 64.703247 ms |	1077526.375000 ms | 93.5%  |
+|uhd_3840_2160_24fps | 9.569598 ms | 1095.937622 ms | 92.275208 ms | 1881330.375000 ms | 99.41% |
+|hd_1920_1080_30fps  | 49.725464 ms | 695.662598 ms	| 63.530586 ms | 1028540.750000 ms | 99.93% |
+
 
 ## Code Organization
 

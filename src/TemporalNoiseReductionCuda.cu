@@ -330,6 +330,25 @@ void applyConversionYUVtoRGBA (
     cudaFree(rgbaFrameDevice);
 }
 
+void printCUDAMemoryInfo() {
+    size_t freeBytes, totalBytes;
+    cudaError_t err = cudaMemGetInfo(&freeBytes, &totalBytes);
+
+    if (err == cudaSuccess) {
+        // Convert bytes to megabytes for readability
+        double freeMB = static_cast<double>(freeBytes) / (1024.0 * 1024.0);
+        double totalMB = static_cast<double>(totalBytes) / (1024.0 * 1024.0);
+        double usedMB = totalMB - freeMB;
+
+        std::cout << "CUDA Device Memory Information:" << std::endl;
+        std::cout << "  Total Memory: " << totalMB << " MB" << std::endl;
+        std::cout << "  Free Memory:  " << freeMB << " MB" << std::endl;
+        std::cout << "  Used Memory:  " << usedMB << " MB" << std::endl;
+    } else {
+        std::cerr << "Error getting CUDA memory info: " << cudaGetErrorString(err) << std::endl;
+    }
+}
+
 // Host code to launch the kernel (simplified)
 float applyTemporalNoiseReduction(
     char *outputFrameHost,
@@ -349,7 +368,7 @@ float applyTemporalNoiseReduction(
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-     
+ 
     float sigma = 3.0f; // The h is sigma*sigma Higher value removesimage contents. 
     int patch_size=3;
 
@@ -425,7 +444,8 @@ float applyTemporalNoiseReduction(
         fprintf(stderr, "cudaMemcpy outputframe device2host failed: %s\n", cudaGetErrorString(err));
         return EXIT_FAILURE;
     }
-
+   
+    
     // Calculate timing infomration
     // Calculate elapsed time in milliseconds
     float milliseconds = 0;
@@ -603,6 +623,7 @@ void getCubicSplineInterpolation(cv::Mat A_vec,
    cublasDestroy_v2(handle);
 }
 
+
 int main (int argc, char* argv[]) { 
     cv::Mat cvFrame;
     int retVal=0;
@@ -645,9 +666,19 @@ int main (int argc, char* argv[]) {
 
     //Initialize CUDA and Libraries
     if(strArch=="CUDA") {
+        // Get device properties
         cudaDeviceProp devProp;
         CUDA_CHECK(cudaGetDeviceProperties(&devProp, 0)); // Get device properties
         printf("GPU Device: %s\n", devProp.name);
+        // Get device count
+        int deviceCount;
+        cudaGetDeviceCount(&deviceCount);
+        if (deviceCount == 0) {
+            std::cerr << "No CUDA devices found." << std::endl;
+            return 1;
+        }
+        // Set CUDA device to 0
+        cudaSetDevice(0);
     }
     
 
@@ -674,14 +705,6 @@ int main (int argc, char* argv[]) {
     prev_frame.setTo(cv::Scalar(0)); 
     out_frame.setTo(cv::Scalar(0)); 
 
-    //create separate y, u, v channels
-    cv::Mat y_channel;
-    cv::Mat u_channel;
-    cv::Mat v_channel;
-
-    y_channel.create(h, w, CV_8UC1);
-    u_channel.create(h, w, CV_8UC1);
-    v_channel.create(h, w, CV_8UC1);
 
     cv::Mat yuv420_image;
     // Constant to run kernel
@@ -700,7 +723,8 @@ int main (int argc, char* argv[]) {
     float time=0;
     float totalTime=0;
 
-
+    std::cout << "Number of frames for mp4" << " " << nframes << std::endl;
+    
     for(auto currFrame=0; currFrame<nframes; currFrame++) {
         // Preprocess Frame
         src >> frame;
@@ -750,6 +774,8 @@ int main (int argc, char* argv[]) {
             time = applyTemporalNoiseReduction((char*)outFramePtr,(char*)yuvFramePtr, (char*)prevFramePtr, w, h, alpha, kernelNum);
             totalTime +=time;
 
+            // Merge y channel to yuv frame. 
+            //out_frame.copyTo(nv12_frame);
 
             //std::string filename ="prev_frame"+std::to_string(currFrame)+".bin";
             //dumpFrameToBinary(filename, prev_frame);
@@ -779,12 +805,18 @@ int main (int argc, char* argv[]) {
 
     }
    
-   printf("Kernel execution time: %f ms\n", totalTime);   
+   printf("Kernel execution time: %f ms\n", totalTime);
+   printCUDAMemoryInfo();
+    
    // Opencv frame release
    prev_frame.release();
    bgr_frame.release();
    yuv_frame.release();
    out_frame.release();
+   yuv420_image.release();
+   A_vec.release();
+   x_vec.release();
+   b_vec.release(); 
 
    return retVal;
 }

@@ -8,7 +8,7 @@ This project demonstrates the use of CUDA advanced libraries for temporal noise 
 This project mainly focus on implementing different cuda kernels and suing advanced libraaries to perform linear algaebra functions or using tensor libraries to generate tensors and peform complex convolution operations.
 
 # Temporal Noise Reduction.
-There are total three kernels are implemented for denpising the video. The input vidoe is converted from BGR to YUV plane and in NV12 format for faster computation. The data is also generated for denoising of grey frames. The first kernel mainly helps reducing noise by taking percentage of current and previous pixels values based on the defined alpha coefficient. If alpha coefficient is 0.75 then 75% of current frame pixels intesity is added to 25% of previous frame pixel intesity to generate a new frame. The second kernel mainly works as a sliding window on the given frame based on 3x3, 5x5 or 7x7 filter. Based on the filter values the median of the pixel intensity is calculated on the filtered image and applied to the filtered frame to denoise pixel intensity. The third kernel is weighted temproal reductions where weights are calculated per pixel intensity and average weight is assigned to current frame. In YUV plan the weight associated with Y plane pixels is twice the weight associated with UV plane pixels.
+There are total three kernels are implemented for denpising the video. The input vidoe is converted from BGR to YUV plane and in NV12 format for faster computation. The data is also generated for denoising of grey frames. The first kernel mainly helps reducing noise by taking percentage of current and previous pixels values based on the defined alpha coefficient. If alpha coefficient is 0.75 then 75% of current frame pixels intesity is added to 25% of previous frame pixel intesity to generate a new frame. The second kernel mainly works as a sliding window on the given frame based on $3x3$, $5x5$ or $7x7$ filter. Based on the filter values the median of the pixel intensity is calculated on the filtered image and applied to the filtered frame to denoise pixel intensity. The third kernel is weighted temproal reductions where weights are calculated per pixel intensity and average weight is assigned to current frame. In YUV plan the weight associated with Y plane pixels is twice the weight associated with UV plane pixels.
 
 # Cubic Spline Interpolation.
 Normally directly interpolating noisy data can amplify noisy data. The interpolation coefficients are generated based on the noised and denoised frames. The function used for it is $Ax=B$ where x is unknown coefficient and its value is calculated by perforining matrix multiplication of $A^TB$ These coeffcients are used for a given time $t$ to calculate final coefficient c(t) as $c(t) = H3,0(t) * p0 + H3,1(t) * v0 + H3,2(t) * v1 + H3,3(t) * p1$ The cubic spline interpolation of these coefficients are plotted by generating new X values spread across MIN and MAX range. GEMM operator can be used to perform matrix multiplication operation for larger frames. There can be limited memory associated for allocation of larger matrix so coefficients are calculated for sample video frames and plotted against newly generated X values. This feature is disabled right now.The data points for the plot are already used from the extracted data.
@@ -21,6 +21,22 @@ The kernel performance is measured on Nvidia A10G GPU and CPU.
 |uhd_3840_2160_24fps | 9.569598 ms | 1095.937622 ms | 92.275208 ms | 1881330.375000 ms | 99.41% |
 |hd_1920_1080_30fps  | 49.725464 ms | 695.662598 ms	| 63.530586 ms | 1028540.750000 ms | 99.93% |
 
+# Memory Usage
+Using nvidia-smi command
+| Process Id | Process Name | Used GPU Memory[MiB] | 
+| ------------- | ------------- | ------------- |
+| 2703050 | TemporalNoiseReduction| 528 MiB |
+| 2733958  | TemporalNoiseReductionKernel |  248 MiB |
+
+Using cudaMemGetInfo()
+
+CUDA Device Memory Information:
+
+Total Memory: 22617.8 MB
+
+Free Memory:  21626.1 MB
+
+Used Memory:  991.688 MB
 
 ## Code Organization
 
